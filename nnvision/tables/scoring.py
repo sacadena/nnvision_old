@@ -10,8 +10,9 @@ from .main import MonkeyExperiment
 from ..utility.measures import get_oracles, get_repeats, get_FEV, get_explainable_var, get_correlations, get_poisson_loss, get_avg_correlations
 from nnfabrik.template import ScoringBase
 from ..tables.from_nnfabrik import TrainedModel
+from nnfabrik.utility.dj_helpers import CustomSchema
 
-schema = dj.schema(dj.config.get('schema_name', 'nnfabrik_core'))
+schema = CustomSchema(dj.config.get('schema_name', 'nnfabrik_core'))
 
 
 @schema
