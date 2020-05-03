@@ -140,3 +140,14 @@ class MEI(MEITemplate):
     trained_model_table = TrainedEnsembleModel
     selector_table = MouseSelector
 
+@schema
+class MonkeyMEI(MEITemplate):
+    method_table = MEIMethod
+    trained_model_table = TrainedModel
+    selector_table = MonkeySelector
+
+@schema
+class MonkeyEnsembleMEI(MEITemplate):
+    method_table = MEIMethod
+    trained_model_table = TrainedEnsembleModel
+    selector_table = MonkeySelector
