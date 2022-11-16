@@ -1,0 +1,65 @@
+version: '3.4'
+x-build: &build
+  context: .
+  dockerfile: Dockerfile
+
+x-shared: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      - GITHUB_USER=${GITHUB_USER}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - DEV_SOURCE=${DEV_SOURCE}
+  volumes:
+    - .:/src/nnvision
+    - ./notebooks:/notebooks
+  env_file:
+    - .env
+
+services:
+  notebook_server:
+    <<: *common
+    volumes:
+      - .:/src/nnvision
+      - ./notebooks:/notebooks
+      - /var/sinz-shared:/data
+    ports:
+      - "8888:8888"
+
+  production_server:
+    <<: *common
+    volumes:
+      - .:/src/nnvision
+      - ./notebooks:/notebooks
+      - /var/sinz-shared:/data
+    ports:
+      - "8888:8888"
+    entrypoint: /usr/local/bin/python3
+    command: /src/nnvision/run.py
+
+  notebook_gpu_server:
+    <<: *common
+    volumes:
+      - .:/src/nnvision
+      - ./notebooks:/notebooks
+      - /var/lib/nova/sinz-shared:/data
+    ports:
+      - "8888:8888"
+
+  production_gpu_server:
+    <<: *common
+    volumes:
+      - .:/src/nnvision
+      - ./notebooks:/notebooks
+      - /var/lib/nova/sinz-shared:/data
+    ports:
+      - "8888:8888"
+    entrypoint: /usr/local/bin/python3
+    command: /src/nnvision/run.py
+
+  notebook_bcm:
+    <<: *common
+    ports:
+      - "8888:8888"
+
