@@ -1,11 +1,13 @@
 import datajoint as dj
 from nnfabrik.main import Model, Dataset, Trainer, Seed, Fabrikant
 from .main import Recording
-from ..utility.measures import get_oracles, get_repeats, get_FEV, get_explainable_var, get_correlations, get_poisson_loss, get_avg_correlations, get_predictions, get_targets
+from ..utility.measures import (get_oracles, get_repeats, get_feve, get_explainable_var, 
+                                get_correlations, get_poisson_loss, get_avg_correlations, 
+                                get_predictions, get_targets)
 from .from_nnfabrik import TrainedModel, TrainedTransferModel
 from .utility import DataCache, TrainedModelCache, EnsembleModelCache
 from nnfabrik.utility.dj_helpers import CustomSchema
-from nnfabrik.template import ScoringBase, SummaryScoringBase
+from .templates import SummaryScoringBase
 from .from_nnfabrik import ScoringBaseNeuronType
 from .from_mei import Ensemble
 
@@ -59,7 +61,30 @@ class CorrelationToAverageScore(ScoringBaseNeuronType):
 class FEVeScore(ScoringBaseNeuronType):
     trainedmodel_table = TrainedModel
     unit_table = Recording.Units
-    measure_function = staticmethod(get_FEV)
+    measure_function = staticmethod(get_feve)
+    measure_dataset = "test"
+    measure_attribute = "feve"
+    data_cache = DataCache
+    model_cache = TrainedModelCache
+    
+    
+@schema
+class FracExplainableVarExplainedScore(ScoringBaseNeuronType):
+    trainedmodel_table = TrainedModel
+    unit_table = Recording.Units
+    measure_function = staticmethod(get_feve)
+    measure_dataset = "test"
+    measure_attribute = "feve"
+    data_cache = DataCache
+    model_cache = TrainedModelCache
+    
+
+@schema
+class FEVe_thresholded(ScoringBaseNeuronType):
+    trainedmodel_table = TrainedModel
+    unit_table = Recording.Units
+    measure_function = staticmethod(get_feve)
+    function_kwargs = dict(threshold=0.15, )
     measure_dataset = "test"
     measure_attribute = "feve"
     data_cache = DataCache
@@ -219,14 +244,6 @@ class TestCorrelationScoreEnsemble(ScoringBaseNeuronType):
 # ============================= SUMMARY SCORES =============================
 
 
-@schema
-class FEVe_thresholded(SummaryScoringBase):
-    trainedmodel_table = TrainedModel
-    measure_function = staticmethod(get_FEV)
-    function_kwargs = dict(threshold=0.15, per_neuron=False)
-    measure_dataset = "test"
-    measure_attribute = "feve"
-    data_cache = DataCache
-    model_cache = TrainedModelCache
+
 
 
