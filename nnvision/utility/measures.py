@@ -65,6 +65,26 @@ def model_predictions(model, dataloader, data_key, device='cpu'):
     return target.numpy(), output.numpy()
 
 
+def get_avg_firing(dataloaders, as_dict=False, per_neuron=True):
+    """
+    Returns average firing rate across the whole dataset
+    """
+
+    avg_firing = {}
+    for k, dataloader in dataloaders.items():
+        target = torch.empty(0)
+        for images, responses in dataloader:
+            if len(images.shape) == 5:
+                responses = responses.squeeze(dim=0)
+            target = torch.cat((target, responses.detach().cpu()), dim=0)
+        avg_firing[k] = target.mean(0).numpy()
+
+    if not as_dict:
+        avg_firing = np.hstack([v for v in avg_firing.values()]) if per_neuron else np.mean(
+            np.hstack([v for v in avg_firing.values()]))
+    return avg_firing
+
+
 def get_avg_correlations(model, dataloaders, device='cpu', as_dict=False, per_neuron=True, **kwargs):
     """
     Returns correlation between model outputs and average responses over repeated trials
@@ -226,89 +246,33 @@ def get_explainable_var(dataloaders, as_dict=False, per_neuron=True, repeat_limi
     dataloaders = dataloaders["test"] if "test" in dataloaders else dataloaders
     explainable_var = {}
     for k ,v in dataloaders.items():
-        _, outputs = get_repeats(v)
+        _, targets = get_repeats(v)
         if repeat_limit is not None:
-            outputs = get_subset_of_repeats(outputs=outputs, repeat_limit=repeat_limit, randomize=randomize)
-        explainable_var[k] = compute_explainable_var(outputs)
+            targets = get_subset_of_repeats(outputs=targets, repeat_limit=repeat_limit, randomize=randomize)
+        explainable_var[k] = compute_explainable_var(targets)
     if not as_dict:
-        explainable_var = np.hstack([v for v in explainable_var.values()]) if per_neuron else np.mean(np.hstack([v for v in explainable_var.values()]))
+        stacked_explainable_var = np.hstack(list(explainable_var.values()))
+        explainable_var = stacked_explainable_var if per_neuron else stacked_explainable_var.mean()
     return explainable_var
 
 
-def compute_explainable_var(outputs, eps=1e-9):
-    ImgVariance = []
-    TotalVar = np.var(np.vstack(outputs), axis=0, ddof=1)
-    for out in outputs:
-        ImgVariance.append(np.var(out, axis=0, ddof=1))
-    ImgVariance = np.vstack(ImgVariance)
-    NoiseVar = np.mean(ImgVariance, axis=0)
-    explainable_var = (TotalVar - NoiseVar) / (TotalVar + eps)
+def compute_explainable_var(targets: np.ndarray) -> np.ndarray:
+    """
+    Compute the explainable variance per neuron.
+    Args:
+        repeated_outputs (array): numpy array with shape (images, repeats, neuron responses), or a list containing for each
+            image an array of shape (repeats, neuron responses).
+    Returns:
+        array: Corrected explainable variance
+    """
+    eps = 1e-9
+    
+    total_var = np.var(np.vstack(targets), axis=0, ddof=1)
+    img_var = np.vstack([np.var(target, axis=0, ddof=1) for target in targets])
+    noise_var = np.mean(img_var, axis=0)
+    explainable_var = (total_var - noise_var) / (total_var + eps)
+    
     return explainable_var
-
-
-def get_FEV(model, dataloaders, device='cpu', as_dict=False, per_neuron=True, threshold=None):
-    """
-    Computes the fraction of explainable variance explained (FEVe) per Neuron, given a model and a dictionary of dataloaders.
-    The dataloaders will have to return batches of identical images, with the corresponing neuronal responses.
-
-    Args:
-        model (object): PyTorch module
-        dataloaders (dict): Dictionary of dataloaders, with keys corresponding to "data_keys" in the model
-        device (str): 'cuda' or 'gpu
-        as_dict (bool): Returns the scores as a dictionary ('data_keys': values) if set to True.
-        per_neuron (bool): Returns the grand average if set to True.
-        threshold (float): for the avg feve, excludes neurons with a explainable variance below threshold
-
-    Returns:
-        FEV (dict, or np.array, or float): Fraction of explainable varianced explained. Per Neuron or as grand average.
-    """
-    dataloaders = dataloaders["test"] if "test" in dataloaders else dataloaders
-    FEV = {}
-    with eval_state(model) if not is_ensemble_function(model) else contextlib.nullcontext():
-        for data_key, dataloader in dataloaders.items():
-            targets, outputs = model_predictions_repeats(model=model,
-                                                         dataloader=dataloader,
-                                                         data_key=data_key,
-                                                         device=device,
-                                                         broadcast_to_target=True)
-            if threshold is None:
-                FEV[data_key] = compute_FEV(targets=targets, outputs=outputs)
-            else:
-                fev, feve = compute_FEV(targets=targets, outputs=outputs, return_exp_var=True)
-                FEV[data_key] = feve[fev>threshold]
-    if not as_dict:
-        FEV = np.hstack([v for v in FEV.values()]) if per_neuron else np.mean(np.hstack([v for v in FEV.values()]))
-    return FEV
-
-
-def compute_FEV(targets, outputs, return_exp_var=False):
-    """
-
-    Args:
-        targets (list): Neuronal responses (ground truth) to image repeats. Dimensions: [num_images] np.array(num_reaps, num_neurons)
-        outputs (list): Model predictions to the repeated images, with an identical shape as the targets
-        return_exp_var (bool): returns the fraction of explainable variance per neuron if set to True
-
-    Returns:
-        FEVe (np.array): the fraction of explainable variance explained per neuron
-        --- optional: FEV (np.array): the fraction
-
-    """
-    ImgVariance = []
-    PredVariance = []
-    for i, _ in enumerate(targets):
-        PredVariance.append((targets[i] - outputs[i]) ** 2)
-        ImgVariance.append(np.var(targets[i], axis=0, ddof=1))
-    PredVariance = np.vstack(PredVariance)
-    ImgVariance = np.vstack(ImgVariance)
-
-    TotalVar = np.var(np.vstack(targets), axis=0, ddof=1)
-    NoiseVar = np.mean(ImgVariance, axis=0)
-    FEV = (TotalVar - NoiseVar) / TotalVar
-
-    PredVar = np.mean(PredVariance, axis=0)
-    FEVe = 1 - (PredVar - NoiseVar) / (TotalVar - NoiseVar)
-    return [FEV, FEVe] if return_exp_var else FEVe
 
 
 def get_cross_oracles(data, reference_data):
@@ -380,3 +344,115 @@ def get_targets(model, dataloaders, device='cpu', as_dict=True, per_neuron=True,
     if not as_dict:
         responses = [v for v in responses.values()]
     return responses
+
+
+class FractionExplainableVarianceExplained:
+    def __init__(self, dataloaders,  model, device="cpu"):
+        
+        self.device = device
+        self.dataloaders = dataloaders["test"] if "test" in dataloaders else dataloaders
+        self.model = model
+        
+        self.targets, self.outputs = self.get_targets_and_outputs(
+            self.dataloaders, self.model, self.device,
+        )   # image (75), session(32), (repeat(around 50) x num_neurons)
+        
+        self.explainable_variance, self.feve = self.get_explainable_and_explained_variance(
+            self.targets, self.outputs,
+        )
+        
+        self.explainable_variance_array = self.stack(self.explainable_variance)
+        self.feve_array = self.stack(self.feve)
+    
+    @staticmethod
+    def stack(input_dict):
+        return np.hstack(list(input_dict.values()))
+    
+    @staticmethod
+    def get_targets_and_outputs(dataloaders, model, device="cpu"):
+        targets, outputs = {}, {}
+        with eval_state(model):
+            for data_key, dataloader in dataloaders.items():
+                targets[data_key], outputs[data_key] = model_predictions_repeats(
+                                                            model=model,
+                                                            dataloader=dataloader,
+                                                            data_key=data_key,
+                                                            device=device,
+                                                            broadcast_to_target=True,
+                )
+        return targets, outputs
+    
+    @staticmethod
+    def compute_feve(targets, outputs):
+        """
+        Compute the fraction of explainable variance explained per neuron
+        Args:
+            targets (array-like): Neuronal neuron responses (ground truth) to image repeats. Dimensions:
+                [num_images] np.array(num_repeats, num_neurons)
+            outputs (array-like): Model predictions to the repeated images, with an identical shape as the targets
+        Returns:
+            (np.array): the fraction of explainable variance per neuron
+            (np.array): the fraction of explained variance explained per neuron
+        """
+
+        eps = 1e-9
+
+        img_var = []
+        pred_var = []
+        for target, prediction in zip(targets, outputs):
+            pred_var.append((target - prediction) ** 2)
+            img_var.append(np.var(target, axis=0, ddof=1))
+
+        pred_var = np.vstack(pred_var)
+        img_var = np.vstack(img_var)
+
+        total_var = np.var(np.vstack(targets), axis=0, ddof=1)
+        noise_var = np.mean(img_var, axis=0)
+        fev = (total_var - noise_var) / (total_var + eps)
+
+        pred_var = np.mean(pred_var, axis=0)
+        fev_e = 1 - (pred_var - noise_var) / (total_var - noise_var)
+
+        return fev, fev_e
+    
+    def get_explainable_and_explained_variance(self, targets, outputs):
+        explainable_variance = {} 
+        feves = {}
+        for data_key in targets:
+            target, output = targets[data_key], outputs[data_key]
+            explainable_variance[data_key], feves[data_key] = self.compute_feve(target, output)
+        
+        return explainable_variance, feves
+    
+    
+def get_feve(model, dataloaders, device='cpu', as_dict=False, per_neuron=True, threshold=None):
+    """
+    Computes the fraction of explainable variance explained (FEVe) per Neuron, given a model and a dictionary of dataloaders.
+    The dataloaders will have to return batches of identical images, with the corresponing neuronal responses.
+
+    Args:
+        model (object): PyTorch module
+        dataloaders (dict): Dictionary of dataloaders, with keys corresponding to "data_keys" in the model
+        device (str): 'cuda' or 'gpu
+        as_dict (bool): Returns the scores as a dictionary ('data_keys': values) if set to True.
+        per_neuron (bool): Returns the grand average if set to True.
+        threshold (float): for the avg feve, excludes neurons with a explainable variance below threshold
+
+    Returns:
+        FEV (dict, or np.array, or float): Fraction of explainable varianced explained. Per Neuron or as grand average.
+    """
+    
+    feve = FractionExplainableVarianceExplained(dataloaders, model, device)
+    if as_dict:
+        if threshold is None:
+            return feve.feve
+        else:
+            return {key: feve.feve[key][feve.explainable_variance[key] >= threshold] for key in feve.feve}
+    else:
+        if threshold:
+            feves_thr = feve.feve_array[feve.explainable_variance_array >= threshold]
+        else:
+            feves_thr = feve.feve_array  
+        return feves_thr if per_neuron else feves_thr.mean()
+    
+    
