@@ -1,5 +1,6 @@
-from featurevis.integration import load_pickled_data
+from nnvision.legacy.featurevis.integration import load_pickled_data
 import numpy as np
+
 
 def get_neuron_mappings(dataset_config, key, load_func=None):
     if load_func is None:

@@ -6,7 +6,7 @@ import numpy as np
 from skimage.transform import rescale
 from collections import namedtuple, Iterable
 import os
-from mlutils.data.samplers import RepeatsBatchSampler
+from neuralpredictors.data.samplers import RepeatsBatchSampler
 
 
 def get_oracle_dataloader(dat,
@@ -67,6 +67,22 @@ def get_validation_split(n_images, train_frac, seed):
     return train_idx, val_idx
 
 
+def get_fraction_of_training_images(image_ids, fraction, seed=None, replace=False):
+
+    if len(image_ids.shape) > 1:
+        raise ValueError("image_ids must be a one dimensional vector ")
+
+    if seed is not None:
+        np.random.seed(seed)
+    else:
+        np.random.seed()
+
+    n_images = len(image_ids)
+    image_indices = np.arange(n_images)
+    idx_out = np.random.choice(image_indices, int(n_images * fraction), replace=replace)
+    return idx_out
+
+
 class ImageCache:
     """
     A simple cache which loads images into memory given a path to the directory where the images are stored.
@@ -125,12 +141,31 @@ class ImageCache:
         """
         applies transformations to the image: downsampling, cropping, rescaling, and dimension expansion.
         """
-        
-        h, w = image.shape
-        rescale_fn = lambda x, s: rescale(x, s, mode='reflect', multichannel=False, anti_aliasing=False, preserve_range=True).astype(x.dtype) 
-        image = image[self.crop[0][0]:h - self.crop[0][1]:self.subsample, self.crop[1][0]:w - self.crop[1][1]:self.subsample]
-        image = image if self.scale == 1 else rescale_fn(image, self.scale)
-        image = image[None,]
+        if len(image.shape) == 2:
+            h, w = image.shape
+            rescale_fn = lambda x, s: rescale(x,
+                                              s,
+                                              mode='reflect',
+                                              multichannel=False,
+                                              anti_aliasing=False,
+                                              preserve_range=True).astype(x.dtype)
+            image = image[self.crop[0][0]:h - self.crop[0][1]:self.subsample,
+                    self.crop[1][0]:w - self.crop[1][1]:self.subsample]
+            image = image if self.scale == 1 else rescale_fn(image, self.scale)
+            image = image[None,]
+            return image
+
+        elif len(image.shape) == 3:
+            h, w = image.shape[:2]
+            rescale_fn = lambda x, s: rescale(x, s, mode='reflect', multichannel=True, anti_aliasing=False,
+                                              preserve_range=True).astype(x.dtype)
+            image = image[self.crop[0][0]:h - self.crop[0][1]:self.subsample,
+                    self.crop[1][0]:w - self.crop[1][1]:self.subsample, ...]
+            image = image if self.scale == 1 else rescale_fn(image, self.scale)
+            image = image[None,].permute(0, 3, 1, 2)
+        else:
+            raise ValueError(f"Image shape has to be two dimensional (grayscale) or three dimensional "
+                             f"(color, with w x h x c). got image shape {image.shape}")
         return image
     
     def normalize_image(self, image):

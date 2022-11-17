@@ -5,9 +5,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from mlutils.measures import *
-from mlutils import measures as mlmeasures
-from mlutils.training import early_stopping, MultipleObjectiveTracker, eval_state, cycle_datasets, Exhauster, LongCycler
+from neuralpredictors.measures import *
+from neuralpredictors import measures as mlmeasures
+from neuralpredictors.training import early_stopping, MultipleObjectiveTracker, eval_state, cycle_datasets, Exhauster, LongCycler
 from nnfabrik.utility.nn_helpers import set_random_seed
 
 from ..utility import measures
@@ -67,20 +67,21 @@ def nnvision_trainer(model, dataloaders, seed, avg_loss=False, scale_loss=True, 
 
         """
         loss_scale = np.sqrt(len(dataloader[data_key].dataset) / args[0].shape[0]) if scale_loss else 1.0
-        return loss_scale * criterion(model(args[0].to(device), data_key), args[1].to(device)) \
+        return loss_scale * criterion(model(args[0].to(device), data_key=data_key), args[1].to(device)) \
                + model.regularizer(data_key)
 
     ##### Model training ####################################################################################################
     model.to(device)
     set_random_seed(seed)
     model.train()
+    loss_value = None
 
-    criterion = getattr(mlmeasures, loss_function)(avg=avg_loss)
+    criterion = getattr(mlmeasures, loss_function)(avg=avg_loss, per_neuron=False)
     stop_closure = partial(getattr(measures, stop_function), dataloaders=dataloaders["validation"], device=device, per_neuron=False, avg=True)
 
     n_iterations = len(LongCycler(dataloaders["train"]))
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr_init)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr_init, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max' if maximize else 'min',
                                                            factor=lr_decay_factor, patience=patience,
                                                            threshold=tolerance,
@@ -90,8 +91,8 @@ def nnvision_trainer(model, dataloaders, seed, avg_loss=False, scale_loss=True, 
     optim_step_count = len(dataloaders["train"].keys()) if loss_accum_batch_n is None else loss_accum_batch_n
 
     if track_training:
-        tracker_dict = dict(correlation=partial(get_correlations(), model=model, dataloaders=dataloaders["validation"], device=device, per_neuron=False),
-                            poisson_loss=partial(get_poisson_loss(), model=model, datalaoders=dataloaders["validation"], device=device, per_neuron=False, avg=False))
+        tracker_dict = dict(correlation=partial(get_correlations, model=model, dataloaders=dataloaders["validation"], device=device, per_neuron=False),
+                            poisson_loss=partial(get_poisson_loss, model=model, dataloaders=dataloaders["validation"], device=device, per_neuron=False, avg=False))
         if hasattr(model, 'tracked_values'):
             tracker_dict.update(model.tracked_values)
         tracker = MultipleObjectiveTracker(**tracker_dict)
@@ -120,10 +121,15 @@ def nnvision_trainer(model, dataloaders, seed, avg_loss=False, scale_loss=True, 
                                                desc="Epoch {}".format(epoch)):
 
             loss = full_objective(model, dataloaders["train"], data_key, *data)
+            # loss = torch.sum(loss)
             loss.backward()
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1, norm_type=2)
+            loss_value = loss
+            # print(f'grad: {model.readout._modules[list(model.readout._modules.keys())[0]].conv.weight.grad[0, 0, :10, :10]}')
             if (batch_no + 1) % optim_step_count == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+        print(f'loss value: {loss_value}')
 
     ##### Model evaluation ####################################################################################################
     model.eval()
@@ -132,7 +138,7 @@ def nnvision_trainer(model, dataloaders, seed, avg_loss=False, scale_loss=True, 
     # Compute avg validation and test correlation
     validation_correlation = get_correlations(model, dataloaders["validation"], device=device, as_dict=False, per_neuron=False)
     test_correlation = get_correlations(model, dataloaders["test"], device=device, as_dict=False, per_neuron=False)
-
+    print(f'loss value: {loss_value}')
     # return the whole tracker output as a dict
     output = {k: v for k, v in tracker.log.items()} if track_training else {}
     output["validation_corr"] = validation_correlation
@@ -140,3 +146,10 @@ def nnvision_trainer(model, dataloaders, seed, avg_loss=False, scale_loss=True, 
     score = np.mean(test_correlation) if return_test_score else np.mean(validation_correlation)
     return score, output, model.state_dict()
 
+
+def shared_readout_trainer(model, dataloaders, seed, uid=None, cb=None):
+    score = 0
+    output = 0
+    model_state = model.state_dict()
+
+    return score, output, model_state

@@ -1,150 +1,280 @@
+from __future__ import annotations
+
 import datajoint as dj
-from featurevis.main import TrainedEnsembleModelTemplate, CSRFV1SelectorTemplate, MEIMethod, MEITemplate
+import warnings
+from functools import partial
+
 from nnfabrik.main import Dataset
-from .from_nnfabrik import TrainedModel
-from mlutils.data.datasets import StaticImageSet, FileTreeDataset
-from featurevis import integration
-from ..mei.helpers import get_neuron_mappings, get_real_mappings
-from ..mei.regularizers import rgb_initial_guess
-from nnfabrik.utility.dj_helpers import make_hash
-from featurevis import integration
-from featurevis.methods import gradient_ascent
+from nnfabrik.utility.dj_helpers import CustomSchema, cleanup_numpy_scalar, make_hash
+from nnfabrik.builder import resolve_fn
 
-import torch
+from .from_nnfabrik import TrainedModel, SharedReadoutTrainedModel, TrainedTransferModel
+from .main import Recording
 
-schema = dj.schema(dj.config.get('schema_name', 'nnfabrik_core'))
+from mei import mixins
+from mei.main import MEITemplate, MEISeed
+from mei.modules import ConstrainedOutputModel
+from torch.utils.data import DataLoader
+from torch.nn import Module, ModuleList
 
-class MouseSelectorTemplate(dj.Computed):
-    """CSRF V1 selector table template.
+from typing import Dict, Any
+Key = Dict[str, Any]
+Dataloaders = Dict[str, DataLoader]
 
-    To create a functional "CSRFV1Selector" table, create a new class that inherits from this template and decorate it
-    with your preferred Datajoint schema. By default, the created table will point to the "Dataset" table in the
-    Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting the class attribute called
-    "dataset_table".
-    """
-
-    dataset_table = Dataset
-
-    definition = """
-    # contains information that can be used to map a neuron's id to its corresponding integer position in the output of
-    # the model. 
-    -> self.dataset_table
-    neuron_id       : smallint unsigned # unique neuron identifier
-    ---
-    neuron_position : smallint unsigned # integer position of the neuron in the model's output 
-    session_id      : varchar(13)       # unique session identifier
-    """
-
-    #_key_source = Dataset & dict(dataset_fn="mouse_static_loaders")
-
-    def make(self, key):
-        dataset_config = (Dataset & key).fetch1("dataset_config")
-
-        path = dataset_config["paths"][0]
-        file_tree = dataset_config.get("file_tree", False)
-        dat = StaticImageSet(path, 'images', 'responses') if not file_tree else FileTreeDataset(path, 'images', 'responses')
-        neuron_ids = dat.neurons.unit_ids
-
-        data_key = path.split('static')[-1].split('.')[0].replace('preproc', '').replace('_nobehavior','')
-
-        mappings = []
-        for neuron_pos, neuron_id in enumerate(neuron_ids):
-            mappings.append(dict(key, neuron_id=neuron_id, neuron_position=neuron_pos, session_id=data_key))
-
-        self.insert(mappings)
-
-    def get_output_selected_model(self, model, key):
-        neuron_pos, session_id = (self & key).fetch1("neuron_position", "session_id")
-        return integration.get_output_selected_model(neuron_pos, session_id, model)
-
-
-class MonkeySelectorTemplate(dj.Computed):
-    """CSRF V1 selector table template.
-
-    To create a functional "CSRFV1Selector" table, create a new class that inherits from this template and decorate it
-    with your preferred Datajoint schema. By default, the created table will point to the "Dataset" table in the
-    Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting the class attribute called
-    "dataset_table".
-    """
-
-    dataset_table = Dataset
-
-    definition = """
-    # contains information that can be used to map a neuron's id to its corresponding integer position in the output of
-    # the model. 
-    -> self.dataset_table
-    neuron_id       : int # unique neuron identifier
-    session_id      : varchar(13)       # unique session identifier
-    ---
-    neuron_position : int # integer position of the neuron in the model's output 
-    
-    """
-
-    #_key_source = Dataset & dict(dataset_fn="nnvision.datasets.monkey_static_loader")
-
-    def make(self, key):
-        dataset_config = (Dataset & key).fetch1("dataset_config")
-        mappings = get_neuron_mappings(dataset_config, key)
-        self.insert(mappings)
-
-    def get_output_selected_model(self, model, key):
-        neuron_pos, session_id = (self & key).fetch1("neuron_position", "session_id")
-        return integration.get_output_selected_model(neuron_pos, session_id, model)
+schema = CustomSchema(dj.config.get('schema_name', 'nnfabrik_core'))
+resolve_target_fn = partial(resolve_fn, default_base='targets')
 
 
 @schema
-class TrainedEnsembleModel(TrainedEnsembleModelTemplate):
+class Method(mixins.MEIMethodMixin, dj.Lookup):
+    seed_table = MEISeed
+
+
+@schema
+class MethodGroup(mixins.MEIMethodMixin, dj.Lookup):
+    seed_table = MEISeed
+
+
+@schema
+class Ensemble(mixins.TrainedEnsembleModelTemplateMixin, dj.Manual):
     dataset_table = Dataset
     trained_model_table = TrainedModel
-
-    def load_model(self, key=None, include_dataloader=True, include_state_dict=True):
-        """Wrapper to preserve the interface of the trained model table."""
-        return integration.load_ensemble_model(self.Member,
-                                               self.trained_model_table,
-                                               key=key,
-                                               include_dataloader=include_dataloader,
-                                               include_state_dict=include_state_dict)
+    class Member(mixins.TrainedEnsembleModelTemplateMixin.Member, dj.Part):
+        pass
 
 
 @schema
-class MouseSelector(MouseSelectorTemplate):
+class SharedReadoutTrainedEnsembleModel(mixins.TrainedEnsembleModelTemplateMixin, dj.Manual):
     dataset_table = Dataset
+    trained_model_table = SharedReadoutTrainedModel
+    class Member(mixins.TrainedEnsembleModelTemplateMixin.Member, dj.Part):
+        pass
 
 
 @schema
-class MonkeySelector(MonkeySelectorTemplate):
-    dataset_table = Dataset
+class MEI(mixins.MEITemplateMixin, dj.Computed):
+    """MEI table template.
 
-
-@schema
-class MEIMethod(dj.Lookup):
-    definition = """
-    # contains methods for generating MEIs and their configurations.
-    method_fn                           : varchar(64)   # name of the method function
-    method_hash                         : varchar(32)   # hash of the method config
-    ---
-    method_config                       : longblob      # method configuration object
-    method_ts       = CURRENT_TIMESTAMP : timestamp     # UTZ timestamp at time of insertion
+    To create a functional "MEI" table, create a new class that inherits from this template and decorate it with your
+    preferred Datajoint schema. Next assign your trained model (or trained ensemble model) and your selector table to
+    the class variables called "trained_model_table" and "selector_table". By default, the created table will point to
+    the "MEIMethod" table in the Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting
+    the class attribute called "method_table".
     """
 
-    def add_method(self, method_fn, method_config):
-        self.insert1(dict(method_fn=method_fn, method_hash=make_hash(method_config), method_config=method_config))
-
-    def generate_mei(self, dataloader, model, key):
-        method_fn, method_config = (self & key).fetch1("method_fn", "method_config")
-        method_fn = integration.import_module(method_fn)
-        if 'get_initial_guess' in method_config:
-            get_initial_guess = integration.import_module(method_config.pop("get_initial_guess"))
-        else:
-            get_initial_guess = torch.randn
-
-        mei, evaluations = method_fn(dataloader, model, method_config, get_initial_guess=get_initial_guess)
-        return dict(key, evaluations=evaluations, mei=mei)
+    trained_model_table = Ensemble
+    selector_table = Recording.Units
+    method_table = Method
+    seed_table = MEISeed
 
 
 @schema
-class MEI(MEITemplate):
-    method_table = MEIMethod
-    trained_model_table = TrainedEnsembleModel
-    selector_table = MouseSelector
+class MEIShared(mixins.MEITemplateMixin, dj.Computed):
+    """MEI table template.
 
+    To create a functional "MEI" table, create a new class that inherits from this template and decorate it with your
+    preferred Datajoint schema. Next assign your trained model (or trained ensemble model) and your selector table to
+    the class variables called "trained_model_table" and "selector_table". By default, the created table will point to
+    the "MEIMethod" table in the Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting
+    the class attribute called "method_table".
+    """
+
+    trained_model_table = SharedReadoutTrainedEnsembleModel
+    selector_table = Recording.Units
+    method_table = Method
+    seed_table = MEISeed
+
+
+@schema
+class MEITargetFunctions(dj.Manual):
+    definition = """
+    target_fn:       varchar(64)
+    target_hash:     varchar(64)
+    ---
+    target_config:   longblob
+    target_comment:  varchar(128)
+    """
+
+    resolve_fn = resolve_target_fn
+
+    @property
+    def fn_config(self):
+        target_fn, target_config = self.fetch1('target_fn', 'target_config')
+        target_config = cleanup_numpy_scalar(target_config)
+        return target_fn, target_config
+
+    def add_entry(self, target_fn, target_config, target_comment='', skip_duplicates=False):
+        """
+        Add a new entry to the TargetFunction table.
+
+        Args:
+            target_fn (string) - name of a callable object. If name contains multiple parts separated by `.`, this is assumed to be found in a another module and
+                dynamic name resolution will be attempted. Other wise, the name will be checked inside `targets` subpackage.
+            target_config (dict) - Python dictionary containing keyword arguments for the target_fn
+            dataset_comment - Optional comment for the entry.
+            target_comment - If True, no error is thrown when a duplicate entry (i.e. entry with same target_fn and target_config) is found.
+
+        Returns:
+            key - key in the table corresponding to the new (or possibly existing, if skip_duplicates=True) entry.
+        """
+
+        try:
+            resolve_target_fn(target_fn)
+        except (NameError, TypeError) as e:
+            warnings.warn(str(e) + '\nTable entry rejected')
+            return
+
+        target_hash = make_hash(target_config)
+        key = dict(target_fn=target_fn, target_hash=target_hash,
+                   target_config=target_config, target_comment=target_comment)
+
+        existing = self.proj() & key
+        if existing:
+            if skip_duplicates:
+                warnings.warn('Corresponding entry found. Skipping...')
+                key = (self & (existing)).fetch1()
+            else:
+                raise ValueError('Corresponding entry already exists')
+        else:
+            self.insert1(key)
+
+        return key
+
+    def get_target_fn(self, key=None):
+        if key is None:
+            key = self.fetch("KEY")
+        target_fn, target_config = (self & key).fn_config
+        return partial(self.resolve_fn(target_fn), **target_config)
+
+
+@schema
+class MEITargetUnits(dj.Manual):
+    definition = """
+    unit_hash:       varchar(64)
+    ---
+    unit_ids:          longblob
+    data_key:          varchar(64)
+    unit_comment:      varchar(128)
+    """
+
+    def add_entry(self, unit_ids, data_key=None, unit_comment='', skip_duplicates=False):
+        """
+        Add a new entry to the TargetFunction table.
+
+        Args:
+            target_fn (string) - name of a callable object. If name contains multiple parts separated by `.`, this is assumed to be found in a another module and
+                dynamic name resolution will be attempted. Other wise, the name will be checked inside `targets` subpackage.
+            target_config (dict) - Python dictionary containing keyword arguments for the target_fn
+            dataset_comment - Optional comment for the entry.
+            target_comment - If True, no error is thrown when a duplicate entry (i.e. entry with same target_fn and target_config) is found.
+
+        Returns:
+            key - key in the table corresponding to the new (or possibly existing, if skip_duplicates=True) entry.
+        """
+
+        unit_hash = make_hash([unit_ids, data_key])
+        key = dict(unit_hash=unit_hash, unit_ids=unit_ids, data_key=data_key, unit_comment=unit_comment)
+
+        existing = self.proj() & key
+        if existing:
+            if skip_duplicates:
+                warnings.warn('Corresponding entry found. Skipping...')
+                key = (self & (existing)).fetch1()
+            else:
+                raise ValueError('Corresponding entry already exists')
+        else:
+            self.insert1(key)
+
+        return key
+
+
+@schema
+class MEIObjective(dj.Computed):
+    target_fn_table = MEITargetFunctions
+    target_unit_table = MEITargetUnits
+    constrained_output_model = ConstrainedOutputModel
+
+    @property
+    def definition(self):
+        definition = """
+        -> self.target_fn_table 
+        -> self.target_unit_table
+        objective_hash:     varchar(64)
+        ---
+        objective_comment:  varchar(128)
+        """
+        return definition
+
+    def make(self, key):
+        objective_hash = make_hash([key["target_hash"], key["unit_hash"]])
+        comments = []
+        comments.append((self.target_fn_table & key).fetch1("target_comment"))
+        comments.append((self.target_unit_table & key).fetch1("unit_comment"))
+
+        key["objective_comment"] = ', '.join(comments)
+        key["objective_hash"] = objective_hash
+        self.insert1(key)
+
+    def get_output_selected_model(self, model: Module, key: Key) -> constrained_output_model:
+        target_fn = (self.target_fn_table & key).get_target_fn()
+        unit_ids, data_key = (self.target_unit_table & key).fetch1("unit_ids", "data_key")
+        return self.constrained_output_model(model, unit_ids, target_fn, forward_kwargs=dict(data_key=data_key))
+
+
+@schema
+class MEITextures(mixins.MEITemplateMixin, dj.Computed):
+    """MEI table template.
+
+    To create a functional "MEI" table, create a new class that inherits from this template and decorate it with your
+    preferred Datajoint schema. Next assign your trained model (or trained ensemble model) and your selector table to
+    the class variables called "trained_model_table" and "selector_table". By default, the created table will point to
+    the "MEIMethod" table in the Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting
+    the class attribute called "method_table".
+    """
+
+    trained_model_table = Ensemble
+    selector_table = MEIObjective
+    method_table = MethodGroup
+    seed_table = MEISeed
+
+
+@schema
+class MEIPrototype(mixins.MEITemplateMixin, dj.Computed):
+    """MEI table template.
+
+    To create a functional "MEI" table, create a new class that inherits from this template and decorate it with your
+    preferred Datajoint schema. Next assign your trained model (or trained ensemble model) and your selector table to
+    the class variables called "trained_model_table" and "selector_table". By default, the created table will point to
+    the "MEIMethod" table in the Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting
+    the class attribute called "method_table".
+    """
+
+    trained_model_table = SharedReadoutTrainedEnsembleModel
+    selector_table = MEIObjective
+    method_table = MethodGroup
+    seed_table = MEISeed
+
+
+@schema
+class TransferEnsembleModel(mixins.TrainedEnsembleModelTemplateMixin, dj.Manual):
+    dataset_table = Dataset
+    trained_model_table = TrainedTransferModel
+    class Member(mixins.TrainedEnsembleModelTemplateMixin.Member, dj.Part):
+        pass
+
+
+@schema
+class MEITransfer(mixins.MEITemplateMixin, dj.Computed):
+    """MEI table template.
+
+    To create a functional "MEI" table, create a new class that inherits from this template and decorate it with your
+    preferred Datajoint schema. Next assign your trained model (or trained ensemble model) and your selector table to
+    the class variables called "trained_model_table" and "selector_table". By default, the created table will point to
+    the "MEIMethod" table in the Datajoint schema called "nnfabrik.main". This behavior can be changed by overwriting
+    the class attribute called "method_table".
+    """
+
+    trained_model_table = TransferEnsembleModel
+    selector_table = Recording.Units
+    method_table = Method
+    seed_table = MEISeed
