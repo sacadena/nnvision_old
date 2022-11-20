@@ -94,7 +94,7 @@ def task_core_gauss_readout(
     )
 
     set_random_seed(seed)
-
+    
     core = TaskDrivenCore2(
         input_channels=core_input_channels,
         model_name=model_name,
