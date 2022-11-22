@@ -25,11 +25,9 @@ from nnvision.models.encoders import Encoder
 from ptrnets.cores.cores import TaskDrivenCore2
 from nnvision.models.cores import JointCore
 
-from nnvision.utility.readout_helpers import (
-    get_core_weights,
-    get_readout_weights,
-    update_readout_bias_with_target_mean,
-)
+from nnvision.utility.statedict_helpers import StateDictHandler
+from nnvision.utility.readout_helpers import update_readout_bias_with_target_mean
+
 
 
 def concatenated_task_cores_gauss_readout(
@@ -91,8 +89,11 @@ def concatenated_task_cores_gauss_readout(
     )
     
     # Load pretrained readout weights (if any)
-    readout_weights = get_readout_weights(pretrained_file)
-    core_weights = get_core_weights(pretrained_file)
+    readout_weights, core_weights = None, None
+    if pretrained_file is not None:
+        state_dict_handle = StateDictHandler(pretrained_file)
+        readout_weights = state_dict_handle.readout_state_dict
+        core_weights = state_dict_handle.core_state_dict
 
     # First core
     set_random_seed(seed)
@@ -110,6 +111,7 @@ def concatenated_task_cores_gauss_readout(
     set_random_seed(seed)
     core_1.initialize()
     
+    # Load running statistics
     if readout_split == "first" and core_weights is not None:
         core_1.load_state_dict(core_weights, strict=False)        
     
@@ -129,8 +131,9 @@ def concatenated_task_cores_gauss_readout(
     set_random_seed(seed)
     core_2.initialize()
     
+    # Load running statistics
     if readout_split == "second" and core_weights is not None:
-        core_1.load_state_dict(core_weights, strict=False)
+        core_2.load_state_dict(core_weights, strict=False) 
     
     # Joint core
     core = JointCore(core_1, core_2)
