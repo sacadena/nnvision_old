@@ -32,7 +32,7 @@ class StateDictHandler:
     
     @property
     def hash_name(self) -> str:
-        return os.path.stem(self.path).split('.')[0]
+        return os.path.basename(self.path).split('.')[0]
     
     def load_state_dict(self) -> Mapping[str, Any]:
         if self.path_exists:
