@@ -627,7 +627,7 @@ class FullGaussian2dJointReadout(FullGaussian2d):
             if field in dir(self):
                 getattr(self, field).data = fields_data[field]
 
-    def return_features(self, features):
+    def _return_features(self, features):
         if self._shared_features:
             return self.scales * features[..., self.feature_sharing_index]
         return features
@@ -635,10 +635,24 @@ class FullGaussian2dJointReadout(FullGaussian2d):
     @property
     def features(self):
         if not self.has_pretrained:
-            return self.return_features(self._features)  
-        return self.return_features(
+            return self._return_features(self._features)  
+        return self._return_features(
             torch.cat([self._features_1, self._features_2], dim=1)
         )
+    
+    def feature_l1(self, average=True):
+        """
+        Returns the l1 regularization term either the mean or the sum of all weights
+        Args:
+            average(bool): if True, use mean of weights for regularization
+        """
+        if self._original_features:
+            if average:
+                return self.features.abs().mean()
+            else:
+                return self.features.abs().sum()
+        else:
+            return 0
 
 
 class MultipleFullGaussian2dJointReadout(MultiReadout, torch.nn.ModuleDict):
